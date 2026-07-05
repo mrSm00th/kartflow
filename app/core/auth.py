@@ -1,3 +1,4 @@
+import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
@@ -13,7 +14,7 @@ from app.core.config import settings
 from app.db.database import get_db
 
 # import app.db.models as models
-from app.modules.users.models import User
+from app.modules.users.models import RefreshToken, User
 
 password_hash = PasswordHash.recommended()
 
@@ -130,3 +131,61 @@ async def get_current_user_ws(
         raise HTTPException(status_code=401, detail="User not found")
 
     return user
+
+
+# refresh toen functions
+
+
+def create_refresh_token() -> str:
+
+    return secrets.token_urlsafe(32)
+
+
+def hash_refresh_token(token: str) -> str:
+
+    return password_hash.hash(token)
+
+
+def verify_refresh_token(plain_token: str, hashed_token: str) -> bool:
+
+    password_hash.verify(plain_token, hashed_token)
+
+
+async def store_refresh_token(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    raw_token: str,
+) -> RefreshToken:
+
+    token_row = RefreshToken(
+        user_id=user_id,
+        token=hash_refresh_token(raw_token),
+        expires_at=datetime.now(UTC) + timedelta(settings.refresh_token_expire_days),
+    )
+
+    db.add(token_row)
+    await db.flush()
+
+    return token_row
+
+
+async def get_valid_refresh_token_row(
+    db: AsyncSession,
+    raw_token: str,
+) -> RefreshToken | None:
+
+    result = await db.execute(
+        select(RefreshToken).where(
+            RefreshToken.revoked == False,
+            RefreshToken.expires_at > datetime.now(UTC),
+        )
+    )
+
+    candidates = result.scalars().all()
+
+    for row in candidates:
+
+        if verify_refresh_token(raw_token, row.token):
+            return row
+
+    return None
