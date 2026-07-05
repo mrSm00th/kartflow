@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     secret_key: SecretStr
     algorithm: str = "HS256"
     access_token_expire_minutes: int = 30
+    refresh_token_expire_days: int = 30
 
     razorpay_key_id: str
     razorpay_key_secret: str

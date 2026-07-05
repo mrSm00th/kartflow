@@ -16,7 +16,11 @@ import app.modules.users.models as models
 from app.core.auth import (
     CurrentUser,
     create_access_token,
+    create_refresh_token,
+    get_valid_refresh_token_row,
     hash_password,
+    hash_refresh_token,
+    store_refresh_token,
     verify_password,
 )
 from app.core.config import settings
@@ -30,6 +34,7 @@ from app.modules.users.schemas import (
     PaginatedOwnerRestaurant,
     PasswordResetConfirm,
     PasswordResetRequest,
+    RefreshRequest,
     RestaurantList,
     SendOTPRequest,
     Token,
@@ -177,7 +182,91 @@ async def login_for_access_token(
         data={"sub": str(user.id), "role": user.role.value},
         expires_delta=timedelta(minutes=settings.access_token_expire_minutes),
     )
-    return Token(access_token=access_token, token_type="bearer")
+
+    raw_refresh_token = create_refresh_token()
+    await store_refresh_token(db, user.id, raw_refresh_token)
+    await db.commit()
+
+    return Token(
+        access_token=access_token,
+        refresh_token=raw_refresh_token,
+        token_type="bearer",
+    )
+
+
+@router.post("/refresh", response_model=Token)
+async def refresh_access_token(
+    data: RefreshRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    token_row = await get_valid_refresh_token_row(db, data.refresh_token)
+
+    if not token_row:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired refresh token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    user = await db.get(models.User, token_row.user_id)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired refresh token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    # rotation: kill the old refresh token, issue a brand new one
+    token_row.revoked = True
+
+    new_access_token = create_access_token(
+        data={"sub": str(user.id), "role": user.role.value},
+        expires_delta=timedelta(minutes=settings.access_token_expire_minutes),
+    )
+    new_raw_refresh_token = create_refresh_token()
+    await store_refresh_token(db, user.id, new_raw_refresh_token)
+    await db.commit()
+
+    return Token(
+        access_token=new_access_token,
+        refresh_token=new_raw_refresh_token,
+        token_type="bearer",
+    )
+
+
+@router.post("/logout", response_model=MessageResponse, status_code=status.HTTP_200_OK)
+async def logout(
+    data: RefreshRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    token_row = await get_valid_refresh_token_row(db, data.refresh_token)
+
+    if token_row:
+        token_row.revoked = True
+        await db.commit()
+
+    # same response for security purpose
+    return MessageResponse(message="Logged out successfully.")
+
+
+@router.post(
+    "/logout-all", response_model=MessageResponse, status_code=status.HTTP_200_OK
+)
+async def logout_all_devices(
+    current_user: CurrentUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    result = await db.execute(
+        select(models.RefreshToken).where(
+            models.RefreshToken.user_id == current_user.id,
+            models.RefreshToken.revoked == False,
+        )
+    )
+    for row in result.scalars().all():
+        row.revoked = True
+
+    await db.commit()
+    return MessageResponse(message="Logged out from all devices.")
 
 
 # current user
